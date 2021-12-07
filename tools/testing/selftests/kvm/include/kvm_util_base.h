@@ -38,6 +38,8 @@ typedef uint64_t vm_vaddr_t; /* Virtual Machine (Guest) virtual address */
 #define DEFAULT_GUEST_STACK_VADDR_MIN	0xab6000
 #define DEFAULT_STACK_PGS		5
 
+#define KVM_MAX_IRQ_ROUTES 4096
+
 enum vm_guest_mode {
 	VM_MODE_P52V48_4K,
 	VM_MODE_P52V48_64K,
@@ -59,9 +61,7 @@ enum vm_guest_mode {
 
 #if defined(__aarch64__)
 
-extern enum vm_guest_mode vm_mode_default;
-
-#define VM_MODE_DEFAULT			vm_mode_default
+#define VM_MODE_DEFAULT			VM_MODE_P40V48_4K
 #define MIN_PAGE_SHIFT			12U
 #define ptes_per_page(page_size)	((page_size) / 8)
 
@@ -76,16 +76,6 @@ extern enum vm_guest_mode vm_mode_default;
 #define VM_MODE_DEFAULT			VM_MODE_P44V64_4K
 #define MIN_PAGE_SHIFT			12U
 #define ptes_per_page(page_size)	((page_size) / 16)
-
-#elif defined(__riscv)
-
-#if __riscv_xlen == 32
-#error "RISC-V 32-bit kvm selftests not supported"
-#endif
-
-#define VM_MODE_DEFAULT			VM_MODE_P40V48_4K
-#define MIN_PAGE_SHIFT			12U
-#define ptes_per_page(page_size)	((page_size) / 8)
 
 #endif
 
@@ -119,11 +109,12 @@ void kvm_vm_clear_dirty_log(struct kvm_vm *vm, int slot, void *log,
 			    uint64_t first_page, uint32_t num_pages);
 uint32_t kvm_vm_reset_dirty_ring(struct kvm_vm *vm);
 
+int kvm_memfd_alloc(size_t size, bool hugepages);
+
 int kvm_memcmp_hva_gva(void *hva, struct kvm_vm *vm, const vm_vaddr_t gva,
 		       size_t len);
 
 void kvm_vm_elf_load(struct kvm_vm *vm, const char *filename);
-int kvm_memfd_alloc(size_t size, bool hugepages);
 
 void vm_dump(FILE *stream, struct kvm_vm *vm, uint8_t indent);
 
@@ -148,14 +139,15 @@ void vcpu_dump(FILE *stream, struct kvm_vm *vm, uint32_t vcpuid,
 
 void vm_create_irqchip(struct kvm_vm *vm);
 
-void vm_set_user_memory_region(struct kvm_vm *vm, uint32_t slot, uint32_t flags,
-			       uint64_t gpa, uint64_t size, void *hva);
-int __vm_set_user_memory_region(struct kvm_vm *vm, uint32_t slot, uint32_t flags,
-				uint64_t gpa, uint64_t size, void *hva);
 void vm_userspace_mem_region_add(struct kvm_vm *vm,
 	enum vm_mem_backing_src_type src_type,
 	uint64_t guest_paddr, uint32_t slot, uint64_t npages,
 	uint32_t flags);
+
+void vm_set_user_memory_region(struct kvm_vm *vm, uint32_t slot, uint32_t flags,
+	uint64_t gpa, uint64_t size, void *hva);
+int __vm_set_user_memory_region(struct kvm_vm *vm, uint32_t slot,
+	uint32_t flags, uint64_t gpa, uint64_t size, void *hva);
 
 void vcpu_ioctl(struct kvm_vm *vm, uint32_t vcpuid, unsigned long ioctl,
 		void *arg);
@@ -264,8 +256,6 @@ int _kvm_device_access(int dev_fd, uint32_t group, uint64_t attr,
 		       void *val, bool write);
 int kvm_device_access(int dev_fd, uint32_t group, uint64_t attr,
 		      void *val, bool write);
-void kvm_irq_line(struct kvm_vm *vm, uint32_t irq, int level);
-int _kvm_irq_line(struct kvm_vm *vm, uint32_t irq, int level);
 
 int _vcpu_has_device_attr(struct kvm_vm *vm, uint32_t vcpuid, uint32_t group,
 			  uint64_t attr);
@@ -275,14 +265,6 @@ int _vcpu_access_device_attr(struct kvm_vm *vm, uint32_t vcpuid, uint32_t group,
 			  uint64_t attr, void *val, bool write);
 int vcpu_access_device_attr(struct kvm_vm *vm, uint32_t vcpuid, uint32_t group,
 			 uint64_t attr, void *val, bool write);
-
-#define KVM_MAX_IRQ_ROUTES		4096
-
-struct kvm_irq_routing *kvm_gsi_routing_create(void);
-void kvm_gsi_routing_irqchip_add(struct kvm_irq_routing *routing,
-		uint32_t gsi, uint32_t pin);
-int _kvm_gsi_routing_write(struct kvm_vm *vm, struct kvm_irq_routing *routing);
-void kvm_gsi_routing_write(struct kvm_vm *vm, struct kvm_irq_routing *routing);
 
 const char *exit_reason_str(unsigned int exit_reason);
 
@@ -335,14 +317,13 @@ struct kvm_vm *vm_create_default_with_vcpus(uint32_t nr_vcpus, uint64_t extra_me
 					    uint32_t num_percpu_pages, void *guest_code,
 					    uint32_t vcpuids[]);
 
+struct kvm_vm *vm_create_without_vcpus(enum vm_guest_mode mode, uint64_t pages);
+
 /* Like vm_create_default_with_vcpus, but accepts mode and slot0 memory as a parameter */
 struct kvm_vm *vm_create_with_vcpus(enum vm_guest_mode mode, uint32_t nr_vcpus,
 				    uint64_t slot0_mem_pages, uint64_t extra_mem_pages,
 				    uint32_t num_percpu_pages, void *guest_code,
 				    uint32_t vcpuids[]);
-
-/* Create a default VM without any vcpus. */
-struct kvm_vm *vm_create_without_vcpus(enum vm_guest_mode mode, uint64_t pages);
 
 /*
  * Adds a vCPU with reasonable defaults (e.g. a stack)
@@ -358,7 +339,7 @@ bool vm_is_unrestricted_guest(struct kvm_vm *vm);
 
 unsigned int vm_get_page_size(struct kvm_vm *vm);
 unsigned int vm_get_page_shift(struct kvm_vm *vm);
-unsigned long vm_compute_max_gfn(struct kvm_vm *vm);
+unsigned long __attribute__((weak)) vm_compute_max_gfn(struct kvm_vm *vm);
 uint64_t vm_get_max_gfn(struct kvm_vm *vm);
 int vm_get_fd(struct kvm_vm *vm);
 
@@ -397,6 +378,55 @@ int vm_create_device(struct kvm_vm *vm, struct kvm_create_device *cd);
 })
 
 void assert_on_unhandled_exception(struct kvm_vm *vm, uint32_t vcpuid);
+
+/* Common ucalls */
+enum {
+	UCALL_NONE,
+	UCALL_SYNC,
+	UCALL_ABORT,
+	UCALL_DONE,
+	UCALL_UNHANDLED,
+};
+
+#define UCALL_MAX_ARGS 6
+
+struct ucall {
+	uint64_t cmd;
+	uint64_t args[UCALL_MAX_ARGS];
+};
+
+void ucall_init(struct kvm_vm *vm, void *arg);
+void ucall_uninit(struct kvm_vm *vm);
+void ucall(uint64_t cmd, int nargs, ...);
+uint64_t get_ucall(struct kvm_vm *vm, uint32_t vcpu_id, struct ucall *uc);
+
+#define GUEST_SYNC_ARGS(stage, arg1, arg2, arg3, arg4)	\
+				ucall(UCALL_SYNC, 6, "hello", stage, arg1, arg2, arg3, arg4)
+#define GUEST_SYNC(stage)	ucall(UCALL_SYNC, 2, "hello", stage)
+#define GUEST_DONE()		ucall(UCALL_DONE, 0)
+#define __GUEST_ASSERT(_condition, _condstr, _nargs, _args...) do {    \
+	if (!(_condition))                                              \
+		ucall(UCALL_ABORT, 2 + _nargs,                          \
+			"Failed guest assert: "                         \
+			_condstr, __LINE__, _args);                     \
+} while (0)
+
+#define GUEST_ASSERT(_condition) \
+	__GUEST_ASSERT(_condition, #_condition, 0, 0)
+
+#define GUEST_ASSERT_1(_condition, arg1) \
+	__GUEST_ASSERT(_condition, #_condition, 1, (arg1))
+
+#define GUEST_ASSERT_2(_condition, arg1, arg2) \
+	__GUEST_ASSERT(_condition, #_condition, 2, (arg1), (arg2))
+
+#define GUEST_ASSERT_3(_condition, arg1, arg2, arg3) \
+	__GUEST_ASSERT(_condition, #_condition, 3, (arg1), (arg2), (arg3))
+
+#define GUEST_ASSERT_4(_condition, arg1, arg2, arg3, arg4) \
+	__GUEST_ASSERT(_condition, #_condition, 4, (arg1), (arg2), (arg3), (arg4))
+
+#define GUEST_ASSERT_EQ(a, b) __GUEST_ASSERT((a) == (b), #a " == " #b, 2, a, b)
 
 int vm_get_stats_fd(struct kvm_vm *vm);
 int vcpu_get_stats_fd(struct kvm_vm *vm, uint32_t vcpuid);
