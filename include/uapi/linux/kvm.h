@@ -2048,4 +2048,12 @@ struct kvm_stats_desc {
 
 #define KVM_GET_STATS_FD  _IO(KVMIO,  0xce)
 
+struct kvm_priv_mem_info {
+	__u64 start;
+	__u64 size;
+};
+
+#define KVM_GET_PRIVATE_GFN_RANGE _IOR(KVMIO, 0xcf, struct kvm_priv_mem_info)
+#define KVM_SET_PRIVATE_GFN_RANGE _IOW(KVMIO, 0xd0, struct kvm_priv_mem_info)
+
 #endif /* __LINUX_KVM_H */

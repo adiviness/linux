@@ -1501,17 +1501,11 @@ static void update_memslots(struct kvm_memslots *slots,
 	}
 }
 
-bool __weak kvm_arch_private_memory_supported(struct kvm *kvm)
-{
-	return false;
-}
-
 static int check_memory_region_flags(const struct kvm_userspace_memory_region *mem)
 {
 	u32 valid_flags = KVM_MEM_LOG_DIRTY_PAGES;
 
-	if (kvm_arch_private_memory_supported(kvm))
-		valid_flags |= KVM_MEM_PRIVATE;
+	valid_flags |= KVM_MEM_PRIVATE;
 
 #ifdef __KVM_HAVE_READONLY_MEM
 	valid_flags |= KVM_MEM_READONLY;
