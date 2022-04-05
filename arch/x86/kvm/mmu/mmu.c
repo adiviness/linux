@@ -3922,6 +3922,17 @@ static bool kvm_arch_setup_async_pf(struct kvm_vcpu *vcpu, gpa_t cr2_or_gpa,
 				  kvm_vcpu_gfn_to_hva(vcpu, gfn), &arch);
 }
 
+__weak bool kvm_vcpu_is_private_gfn(struct kvm_vcpu *vcpu, gpa_t gfn)
+{
+	gpa_t priv_gfn_start = vcpu->priv_gpa_start >> PAGE_SHIFT;
+	gpa_t priv_gfn_end = vcpu->priv_gpa_end >> PAGE_SHIFT;
+
+	if ((gfn >= priv_gfn_start) && (gfn < priv_gfn_end))
+		return true;
+
+	return false;
+}
+
 static bool kvm_faultin_pfn_private(struct kvm_vcpu *vcpu,
 				    struct kvm_page_fault *fault,
 				    bool *is_private_pfn, int *r)

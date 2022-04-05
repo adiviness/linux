@@ -305,6 +305,8 @@ struct kvm_vcpu {
 	u64 requests;
 	unsigned long guest_debug;
 
+	uint64_t priv_gpa_start;
+	uint64_t priv_gpa_end;
 	int pre_pcpu;
 	struct list_head blocked_vcpu_list;
 

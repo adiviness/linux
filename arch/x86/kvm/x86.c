@@ -5497,6 +5497,30 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 		r = __set_sregs2(vcpu, u.sregs2);
 		break;
 	}
+	case KVM_GET_PRIVATE_GPA_RANGE: {
+		struct kvm_priv_mem_info pminfo;
+
+		pminfo.start = vcpu->priv_gpa_start;
+		pminfo.size = vcpu->priv_gpa_end - vcpu->priv_gpa_start;
+		r = -EFAULT;
+		if (copy_to_user(argp, &pminfo, sizeof(pminfo)))
+			goto out;
+		r = 0;
+		break;
+	}
+	case KVM_SET_PRIVATE_GPA_RANGE: {
+		struct kvm_priv_mem_info pminfo;
+
+		r = -EFAULT;
+		if (copy_from_user(&pminfo, argp, sizeof(pminfo)))
+			goto out;
+		if ((pminfo.start + pminfo.size) < pminfo.start)
+			goto out;
+		vcpu->priv_gpa_start = pminfo.start;
+		vcpu->priv_gpa_end = pminfo.start + pminfo.size;
+		r = 0;
+		break;
+	}
 	case KVM_HAS_DEVICE_ATTR:
 	case KVM_GET_DEVICE_ATTR:
 	case KVM_SET_DEVICE_ATTR:
