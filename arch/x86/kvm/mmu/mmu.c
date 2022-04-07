@@ -3895,10 +3895,11 @@ static bool kvm_arch_setup_async_pf(struct kvm_vcpu *vcpu, gpa_t cr2_or_gpa,
 
 static bool kvm_vcpu_is_private_gfn(struct kvm_vcpu *vcpu, gfn_t gfn)
 {
-	/*
-	 * At this time private gfn has not been supported yet. Other patch
-	 * that enables it should change this.
-	 */
+	gpa_t priv_gfn_end = vcpu->priv_gfn + vcpu->priv_pages;
+
+	if ((gfn >= vcpu->priv_gfn) && (gfn < priv_gfn_end))
+		return true;
+
 	return false;
 }
 
