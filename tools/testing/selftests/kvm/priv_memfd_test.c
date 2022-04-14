@@ -18,8 +18,10 @@
 #include <processor.h>
 
 #define PRIV_MEM_GPA		0xb0000000
-#define PRIV_MEM_SIZE		0x2000
-#define PRIV_MEM_END		(PRIV_MEM_GPA + PRIV_MEM_SIZE)
+
+#define MAP_HUGE_2MB    (21 << MAP_HUGE_SHIFT)
+#define MAP_HUGE_1GB    (30 << MAP_HUGE_SHIFT)
+
 
 #define SHARED_MEM_DATA_BYTE	0x66
 #define PRIV_MEM_DATA_BYTE	0x99
@@ -28,7 +30,30 @@
 
 #define VCPU_ID			0
 
+#define _4KB_PAGE_SIZE 0x1000
+#define _2MB_PAGE_SIZE ((_4KB_PAGE_SIZE * 1024 / 2))
+#define _1GB_PAGE_SIZE 0x40000000
+
 #define VM_STAGE_PROCESSED(x)	pr_info("Processed stage %s\n", #x)
+
+static size_t priv_mem_size = _4KB_PAGE_SIZE;
+
+size_t page_size(const unsigned int page_type) {
+	switch (page_type) {
+	case X86_PAGE_SIZE_4K:
+		return _4KB_PAGE_SIZE;
+	case X86_PAGE_SIZE_2M:
+		return _2MB_PAGE_SIZE;
+	case X86_PAGE_SIZE_1G:
+		return _1GB_PAGE_SIZE;
+	default:
+		return 0;
+	}
+}
+
+size_t priv_mem_end() {
+	return PRIV_MEM_GPA + priv_mem_size;
+}
 
 typedef bool (*vm_stage_handler_fn)(struct kvm_vm *,
 				void *, uint64_t);
@@ -80,14 +105,14 @@ static bool pmpat_handle_vm_stage(struct kvm_vm *vm,
 	switch (stage) {
 	case PMPAT_GUEST_STARTED: {
 		/* Initialize the contents of shared memory */
-		memset(shared_mem, SHARED_MEM_DATA_BYTE, PRIV_MEM_SIZE);
+		memset(shared_mem, SHARED_MEM_DATA_BYTE, priv_mem_size);
 		VM_STAGE_PROCESSED(PMPAT_GUEST_STARTED);
 		break;
 	}
 	case PMPAT_GUEST_PRIV_MEM_UPDATED: {
 		/* verify host updated data is still intact */
 		TEST_ASSERT(verify_byte_pattern(shared_mem,
-			SHARED_MEM_DATA_BYTE, PRIV_MEM_SIZE),
+			SHARED_MEM_DATA_BYTE, priv_mem_size),
 			"Shared memory view mismatch");
 		VM_STAGE_PROCESSED(PMPAT_GUEST_PRIV_MEM_UPDATED);
 		break;
@@ -106,11 +131,11 @@ static void pmpat_guest_code(void)
 
 	GUEST_SYNC(PMPAT_GUEST_STARTED);
 
-	memset(priv_mem, PRIV_MEM_DATA_BYTE, PRIV_MEM_SIZE);
+	memset(priv_mem, PRIV_MEM_DATA_BYTE, priv_mem_size);
 	GUEST_SYNC(PMPAT_GUEST_PRIV_MEM_UPDATED);
 
 	GUEST_ASSERT(verify_byte_pattern(priv_mem,
-			PRIV_MEM_DATA_BYTE, PRIV_MEM_SIZE));
+			PRIV_MEM_DATA_BYTE, priv_mem_size));
 
 	GUEST_DONE();
 }
@@ -123,7 +148,8 @@ static struct test_run_helper priv_memfd_testsuite[] = {
 	},
 };
 
-static void vcpu_work(struct kvm_vm *vm, uint32_t test_id)
+static void vcpu_work(struct kvm_vm *vm,
+					  uint32_t test_id)
 {
 	struct kvm_run *run;
 	struct ucall uc;
@@ -133,6 +159,7 @@ static void vcpu_work(struct kvm_vm *vm, uint32_t test_id)
 	 * Loop until the guest is done.
 	 */
 	run = vcpu_state(vm, VCPU_ID);
+	run->exit_reason = 0;
 
 	while (1) {
 		vcpu_run(vm, VCPU_ID);
@@ -167,7 +194,7 @@ static void vcpu_work(struct kvm_vm *vm, uint32_t test_id)
 			attrs = run->hypercall.args[2];
 
 			if ((gpa >= PRIV_MEM_GPA) && ((gpa +
-				(npages << MIN_PAGE_SHIFT)) <= PRIV_MEM_END)) {
+				(npages << MIN_PAGE_SHIFT)) <= priv_mem_end())) {
 				printf("Unhandled gpa 0x%lx npages %ld\n",
 					gpa, npages);
 				break;
@@ -203,8 +230,8 @@ static void vcpu_work(struct kvm_vm *vm, uint32_t test_id)
 			size = run->memory.size;
 			flags = run->memory.flags;
 
-			if ((gpa < PRIV_MEM_GPA) || ((gpa + size)
-							> PRIV_MEM_END)) {
+			if ((gpa < PRIV_MEM_GPA) ||
+				((gpa + size) > priv_mem_end())) {
 				printf("Unhandled gpa 0x%lx size 0x%lx\n",
 					gpa, size);
 				break;
@@ -256,7 +283,9 @@ static int priv_memory_region_add(struct kvm_vm *vm, void *mem, uint32_t slot,
 }
 
 /* Do private access to the guest's private memory */
-static void setup_and_execute_test(uint32_t test_id)
+static void setup_and_execute_test(uint32_t test_id,
+								   const int page_type,
+								   const int page_count)
 {
 	struct kvm_vm *vm;
 	int priv_memfd = -1;
@@ -268,33 +297,47 @@ static void setup_and_execute_test(uint32_t test_id)
 				priv_memfd_testsuite[test_id].guest_fn);
 
 	/* Allocate shared memory */
-	shared_mem = mmap(NULL, PRIV_MEM_SIZE,
+	int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
+	size_t mem_size = _4KB_PAGE_SIZE * page_count;
+	unsigned int memfd_flags = MFD_INACCESSIBLE;
+	if (page_type == X86_PAGE_SIZE_2M) {
+		mmap_flags |= (MAP_HUGETLB | MAP_HUGE_2MB);
+		memfd_flags |= (MFD_HUGETLB | MFD_HUGE_2MB);
+		mem_size = _2MB_PAGE_SIZE * page_count;
+	}
+	else if (page_type == X86_PAGE_SIZE_1G) {
+		mmap_flags |= (MAP_HUGETLB | MAP_HUGE_1GB);
+		memfd_flags |= (MFD_HUGETLB | MFD_HUGE_1GB);
+		mem_size = _1GB_PAGE_SIZE * page_count;
+	}
+	priv_mem_size = mem_size;
+	shared_mem = mmap(NULL, mem_size,
 			PROT_READ | PROT_WRITE,
-			MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+			mmap_flags, -1, 0);
 	TEST_ASSERT(shared_mem != MAP_FAILED, "Failed to mmap() host");
 
 	/* Allocate private memory */
-	priv_memfd = memfd_create("vm_private_mem", MFD_INACCESSIBLE);
+	priv_memfd = memfd_create("vm_private_mem", memfd_flags);
 	TEST_ASSERT(priv_memfd != -1, "Failed to create priv_memfd");
-	ret = fallocate(priv_memfd, 0, 0, PRIV_MEM_SIZE);
+	ret = fallocate(priv_memfd, 0, 0, mem_size);
 	TEST_ASSERT(ret != -1, "fallocate failed");
 
 	ret = priv_memory_region_add(vm, shared_mem,
-				     PRIV_MEM_SLOT, PRIV_MEM_SIZE,
+				     PRIV_MEM_SLOT, mem_size,
 				     PRIV_MEM_GPA, priv_memfd, 0);
 	TEST_ASSERT(ret == 0, "KVM_SET_USER_MEMORY_REGION IOCTL failed,\n"
 			" rc: %i errno: %i slot: %i\n",
 			ret, errno, PRIV_MEM_SLOT);
 
 	pr_info("Mapping guest private pages 0x%x page_size 0x%x\n",
-					PRIV_MEM_SIZE/vm_get_page_size(vm),
+					mem_size/vm_get_page_size(vm),
 					vm_get_page_size(vm));
 	virt_map(vm, PRIV_MEM_GPA, PRIV_MEM_GPA,
-					(PRIV_MEM_SIZE/vm_get_page_size(vm)));
+					(mem_size/vm_get_page_size(vm)));
 
 	/* Mark all accesses from vcpu as private accesses */
 	priv_mem_info.start = PRIV_MEM_GPA;
-	priv_mem_info.size = PRIV_MEM_SIZE;
+	priv_mem_info.size = mem_size;
 	ret = ioctl(vcpu_get_fd(vm, VCPU_ID), KVM_SET_PRIVATE_GPA_RANGE,
 		&priv_mem_info);
 	TEST_ASSERT(ret == 0, "VCPU ioctl to set private memory failed!\n");
@@ -307,11 +350,24 @@ static void setup_and_execute_test(uint32_t test_id)
 	priv_memfd_testsuite[test_id].priv_memfd = priv_memfd;
 	vcpu_work(vm, test_id);
 
-	munmap(shared_mem, PRIV_MEM_SIZE);
+	munmap(shared_mem, mem_size);
 	priv_memfd_testsuite[test_id].shared_mem = NULL;
 	close(priv_memfd);
 	priv_memfd_testsuite[test_id].priv_memfd = -1;
 	kvm_vm_free(vm);
+}
+
+char* page_size_to_str(const unsigned int val) {
+	switch (val) {
+	case X86_PAGE_SIZE_4K:
+		return "X86_PAGE_SIZE_4K";
+	case X86_PAGE_SIZE_2M:
+		return "X86_PAGE_SIZE_2M";
+	case X86_PAGE_SIZE_1G:
+		return "X86_PAGE_SIZE_1G";
+	default:
+		return "UNKNOWN";
+	}
 }
 
 int main(int argc, char *argv[])
@@ -319,11 +375,20 @@ int main(int argc, char *argv[])
 	/* Tell stdout not to buffer its content */
 	setbuf(stdout, NULL);
 
+	int page_sizes[] = { X86_PAGE_SIZE_4K/*, X86_PAGE_SIZE_2M */};
+
 	for (uint32_t i = 0; i < ARRAY_SIZE(priv_memfd_testsuite); i++) {
-		pr_info("Running test %s\n", priv_memfd_testsuite[i].test_desc);
-		setup_and_execute_test(i);
-		pr_info("completed test %s\n",
-				priv_memfd_testsuite[i].test_desc);
+		for (uint32_t j = 0; j < ARRAY_SIZE(page_sizes); j++) {
+			const int page_size = page_sizes[j];
+			// 4k page size tests allocate two pages
+			const int page_count = (page_size == X86_PAGE_SIZE_4K) ? 2 : 1;
+			pr_info("Running test %s with host page size %s\n",
+					priv_memfd_testsuite[i].test_desc,
+					page_size_to_str(page_size));
+			setup_and_execute_test(i, page_size, page_count);
+			pr_info("completed test %s\n\n",
+					priv_memfd_testsuite[i].test_desc);
+		}
 	}
 
 	return 0;
