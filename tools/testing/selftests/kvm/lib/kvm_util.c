@@ -1619,7 +1619,7 @@ struct kvm_run *vcpu_state(struct kvm_vm *vm, uint32_t vcpuid)
 void vcpu_run(struct kvm_vm *vm, uint32_t vcpuid)
 {
 	int ret = _vcpu_run(vm, vcpuid);
-	TEST_ASSERT(ret == 0, "KVM_RUN IOCTL failed, "
+	TEST_ASSERT((ret == 0) || (ret == -1), "KVM_RUN IOCTL failed, "
 		"rc: %i errno: %i", ret, errno);
 }
 
