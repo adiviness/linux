@@ -856,8 +856,10 @@ static void kvm_memfile_notifier_handler(struct memfile_notifier *notifier,
 	};
 	struct kvm *kvm = slot->kvm;
 
-	gfn_range.start = max(gfn_range.start, slot->base_gfn);
-	gfn_range.end = min(gfn_range.end, slot->base_gfn + slot->npages);
+	gfn_range.start = slot->base_gfn +
+		min((unsigned long)gfn_range.start, slot->npages);
+	gfn_range.end = slot->base_gfn +
+		min((unsigned long)gfn_range.end, slot->npages);
 
 	if (gfn_range.start >= gfn_range.end)
 		return;
