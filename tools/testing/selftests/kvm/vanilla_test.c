@@ -86,17 +86,26 @@ void memfd_create_vm() {
 
 	int memfd = memfd_create("blah_vm_private_mem", memfd_flags);
 	TEST_ASSERT(memfd != -1, "Failed to create memfd");
+	int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE
+		| MAP_HUGETLB | MAP_HUGE_2MB;
+
+	void* shared_mem = mmap(NULL,
+							mem_size,
+							PROT_READ | PROT_WRITE,
+							mmap_flags, memfd, 0);
+	TEST_ASSERT(shared_mem != MAP_FAILED, "Failed to mmap() host");
+	/*
 	int ret = fallocate(memfd, 0, 0, mem_size);
 	TEST_ASSERT(ret != -1, "fallocate failed");
+	*/
 
 	struct kvm_userspace_memory_region region;
 	region.slot = MEM_SLOT;
 	region.flags = 0;
 	region.guest_phys_addr = GUEST_ADDR;
 	region.memory_size = _2MB_PAGE_SIZE;
-	// TODO how to get address from memfd file descriptor?
-	//region.userspace_addr = shared_mem;
-	ret = ioctl(vm_get_fd(vm), KVM_SET_USER_MEMORY_REGION, &region);
+	region.userspace_addr = shared_mem;
+	int ret = ioctl(vm_get_fd(vm), KVM_SET_USER_MEMORY_REGION, &region);
 	TEST_ASSERT(ret == 0, "failed to allocate memory");
 	printf("running vm\n");
 
@@ -117,8 +126,8 @@ int main(int argc, char** argv) {
 
 	printf("mmap version\n");
 	mmap_vm();
-	//printf("memfd_create version\n");
-	//memfd_create_vm();
+	printf("memfd_create version\n");
+	memfd_create_vm();
 
 	return 0;
 }
