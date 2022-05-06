@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #define _GNU_SOURCE /* for program_invocation_short_name */
 #include <fcntl.h>
+#include <limits.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
@@ -17,7 +18,6 @@
 #include <kvm_util.h>
 #include <processor.h>
 
-#define BITS_IN_BYTE 8
 #define BYTE_MASK 0xFF
 
 // flags for mmap
@@ -25,9 +25,9 @@
 #define MAP_HUGE_1GB    (30 << MAP_HUGE_SHIFT)
 
 // page sizes
-#define _4KB_PAGE_SIZE ((size_t)0x1000)
-#define _2MB_PAGE_SIZE (_4KB_PAGE_SIZE * (size_t)516)
-#define _1GB_PAGE_SIZE ((_4KB_PAGE_SIZE * 256) * 1024)
+#define PAGE_SIZE_4KB ((size_t)0x1000)
+#define PAGE_SIZE_2MB (PAGE_SIZE_4KB * (size_t)516)
+#define PAGE_SIZE_1GB ((PAGE_SIZE_4KB * 256) * 1024)
 
 #define TEST_MEM_GPA		0xb0000000
 #define TEST_MEM_DATA_BYTE1	0x66
@@ -71,7 +71,7 @@ struct page_combo {
 	enum page_size private;
 };
 
-char *page_size_to_str(enum page_size x)
+static char *page_size_to_str(enum page_size x)
 {
 	switch (x) {
 	case PAGE_4KB:
@@ -85,7 +85,7 @@ char *page_size_to_str(enum page_size x)
 	}
 }
 
-uint64_t test_mem_end(const uint64_t start, const uint64_t size)
+static uint64_t test_mem_end(const uint64_t start, const uint64_t size)
 {
 	return start + size;
 }
@@ -892,7 +892,7 @@ static void vcpu_work(struct kvm_vm *vm, uint32_t test_id)
 				for (int i = 0; i < sizeof(uint64_t); ++i) {
 					run->mmio.data[i] =
 						(test_mem_size >> shift_amount) & BYTE_MASK;
-					shift_amount += BITS_IN_BYTE;
+					shift_amount += CHAR_BIT;
 				}
 			}
 			continue;
@@ -908,7 +908,6 @@ static void vcpu_work(struct kvm_vm *vm, uint32_t test_id)
 			continue;
 		}
 
-		pr_info("exit_reason = %d\n", run->exit_reason);
 		TEST_FAIL("Unhandled VCPU exit reason %d\n", run->exit_reason);
 		break;
 	}
@@ -938,8 +937,8 @@ static void priv_memory_region_add(struct kvm_vm *vm, void *mem, uint32_t slot,
 }
 
 static void setup_and_execute_test(uint32_t test_id,
-								   const enum page_size shared,
-								   const enum page_size private)
+	const enum page_size shared,
+	const enum page_size private)
 {
 	struct kvm_vm *vm;
 	int priv_memfd;
@@ -951,7 +950,8 @@ static void setup_and_execute_test(uint32_t test_id,
 				priv_memfd_testsuite[test_id].guest_fn);
 
 	// use 2 pages by default
-	size_t mem_size = _4KB_PAGE_SIZE * 2;
+	size_t mem_size = PAGE_SIZE_4KB * 2;
+	bool using_hugepages = false;
 
 	int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
 
@@ -960,12 +960,14 @@ static void setup_and_execute_test(uint32_t test_id,
 		// no additional flags are needed
 		break;
 	case PAGE_2MB:
-		mmap_flags |= MAP_HUGETLB | MAP_HUGE_2MB;
-		mem_size = max(mem_size, _2MB_PAGE_SIZE);
+		mmap_flags |= MAP_HUGETLB | MAP_HUGE_2MB | MAP_POPULATE;
+		mem_size = max(mem_size, PAGE_SIZE_2MB);
+		using_hugepages = true;
 		break;
 	case PAGE_1GB:
-		mmap_flags |= MAP_HUGETLB | MAP_HUGE_1GB;
-		mem_size = max(mem_size, _1GB_PAGE_SIZE);
+		mmap_flags |= MAP_HUGETLB | MAP_HUGE_1GB | MAP_POPULATE;
+		mem_size = max(mem_size, PAGE_SIZE_1GB);
+		using_hugepages = true;
 		break;
 	default:
 		TEST_FAIL("unknown page size for shared memory\n");
@@ -979,11 +981,13 @@ static void setup_and_execute_test(uint32_t test_id,
 		break;
 	case PAGE_2MB:
 		memfd_flags |= MFD_HUGETLB | MFD_HUGE_2MB;
-		mem_size = _2MB_PAGE_SIZE;
+		mem_size = PAGE_SIZE_2MB;
+		using_hugepages = true;
 		break;
 	case PAGE_1GB:
 		memfd_flags |= MFD_HUGETLB | MFD_HUGE_1GB;
-		mem_size = _1GB_PAGE_SIZE;
+		mem_size = PAGE_SIZE_1GB;
+		using_hugepages = true;
 		break;
 	default:
 		TEST_FAIL("unknown page size for private memory\n");
@@ -997,6 +1001,11 @@ static void setup_and_execute_test(uint32_t test_id,
 			PROT_READ | PROT_WRITE,
 			mmap_flags, -1, 0);
 	TEST_ASSERT(shared_mem != MAP_FAILED, "Failed to mmap() host");
+
+	if (using_hugepages) {
+		ret = madvise(shared_mem, mem_size, MADV_WILLNEED);
+		TEST_ASSERT(ret == 0, "madvise failed");
+	}
 
 	/* Allocate private memory */
 	priv_memfd = memfd_create("vm_private_mem", memfd_flags);
@@ -1040,37 +1049,75 @@ static void setup_and_execute_test(uint32_t test_id,
 	kvm_vm_free(vm);
 }
 
-bool is_using_hugepages(const struct page_combo pages)
+static void hugepage_requirements_text(const struct page_combo matrix)
 {
-	return !(pages.shared == PAGE_4KB && pages.private == PAGE_4KB);
-}
-
-void hugepage_requirements_text(const struct page_combo matrix)
-{
-	int _2mb_pages_needed = 0;
-	int _1gb_pages_needed = 0;
+	int pages_needed_2mb = 0;
+	int pages_needed_1gb = 0;
 	enum page_size sizes[] = { matrix.shared, matrix.private };
 
 	for (int i = 0; i < ARRAY_SIZE(sizes); ++i) {
 		if (sizes[i] == PAGE_2MB)
-			++_2mb_pages_needed;
+			++pages_needed_2mb;
 		if (sizes[i] == PAGE_1GB)
-			++_1gb_pages_needed;
+			++pages_needed_1gb;
 	}
-	if (_2mb_pages_needed != 0 && _1gb_pages_needed != 0) {
+	if (pages_needed_2mb != 0 && pages_needed_1gb != 0) {
 		pr_info("This test requires %d 2MB page(s) and %d 1GB page(s)\n",
-				_2mb_pages_needed, _1gb_pages_needed);
-	} else if (_2mb_pages_needed != 0) {
-		pr_info("This test requires %d 2MB page(s)\n", _2mb_pages_needed);
-	} else if (_1gb_pages_needed != 0) {
-		pr_info("This test requires %d 1GB page(s)\n", _1gb_pages_needed);
+				pages_needed_2mb, pages_needed_1gb);
+	} else if (pages_needed_2mb != 0) {
+		pr_info("This test requires %d 2MB page(s)\n", pages_needed_2mb);
+	} else if (pages_needed_1gb != 0) {
+		pr_info("This test requires %d 1GB page(s)\n", pages_needed_1gb);
 	}
+}
+
+static bool should_skip_test(const struct page_combo matrix,
+	const bool use_2mb_pages,
+	const bool use_1gb_pages)
+{
+	if ((matrix.shared == PAGE_2MB || matrix.private == PAGE_2MB)
+		&& !use_2mb_pages)
+		return true;
+	if ((matrix.shared == PAGE_1GB || matrix.private == PAGE_1GB)
+		&& !use_1gb_pages)
+		return true;
+	return false;
+}
+
+static void print_help(const char *const name)
+{
+	puts("");
+	printf("usage %s [-h] [-m] [-g]\n", name);
+	puts("");
+	printf(" -h: Display this help message\n");
+	printf(" -m: include test runs using 2MB page permutations\n");
+	printf(" -g: include test runs using 1GB page permutations\n");
+	exit(0);
 }
 
 int main(int argc, char *argv[])
 {
 	/* Tell stdout not to buffer its content */
 	setbuf(stdout, NULL);
+
+	// arg parsing
+	int opt;
+	bool use_2mb_pages = false;
+	bool use_1gb_pages = false;
+
+	while ((opt = getopt(argc, argv, "mgh")) != -1) {
+		switch (opt) {
+		case 'm':
+			use_2mb_pages = true;
+			break;
+		case 'g':
+			use_1gb_pages = true;
+			break;
+		case 'h':
+		default:
+			print_help(argv[0]);
+		}
+	}
 
 	struct page_combo page_size_matrix[] = {
 		{ .shared = PAGE_4KB, .private = PAGE_4KB },
@@ -1081,6 +1128,9 @@ int main(int argc, char *argv[])
 		for (uint32_t j = 0; j < ARRAY_SIZE(page_size_matrix); j++) {
 			const struct page_combo current_page_matrix = page_size_matrix[j];
 
+			if (should_skip_test(current_page_matrix,
+				use_2mb_pages, use_1gb_pages))
+				break;
 			pr_info("=== Starting test %s... ===\n",
 					priv_memfd_testsuite[i].test_desc);
 			pr_info("using page sizes shared: %s private: %s\n",
